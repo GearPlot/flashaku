@@ -1,0 +1,429 @@
+#!yab
+
+// Prologue
+
+ProgramName$ = "Flashaku"
+ProgramVersion$ = "v1.0.0"
+AuthorName$ = "Created by:  GearPlot  -rjq 2026"
+ProgramLicense$ = "Public Domain"
+ProgramBriefDescription$ = "Flashaku is a simple, lightweight USB image writer utility designed specifically for Haiku OS. Written in Yab, it provides a graphical user interface (GUI) wrapper around the native `dd` utility, allowing users to securely write ISO and raw disk images to USB flash drives."
+ProgramAcknowledgements$ = "Special thanks to:  Gemini AI"
+// Lasted changed on 2026-07-26
+
+// Anyone is free to copy, modify, publish, use, compile, sell, or
+// distribute this software, either in source code form or as a compiled
+// binary, for any purpose, commercial or non-commercial, and by any means.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+// IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+// OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+// ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+// OTHER DEALINGS IN THE SOFTWARE.
+
+// ==== CHANGE FILE LOCATION ON BUILD ====
+icon$ = "/boot/system/apps/Flashaku/data/icon2.png"
+
+// set DEBUG = 1 to print out all messages on the console
+DEBUG = 0
+
+isWriting = false
+isoSize = 0
+writeIconCount = 1
+
+OpenWindow()
+RefreshTargetList()
+
+// Main Message Loop
+dim msg$(1)
+while(not leavingLoop)
+	nCommands = token(message$, msg$(), "|")
+
+	for everyCommand = 1 to nCommands
+		if(DEBUG and msg$(everyCommand)<>"") print msg$(everyCommand)
+
+		switch(msg$(everyCommand))
+			case "MainWindow:File:About":
+				openAboutWin()
+				break
+			case "MainWindow:File:Quit":
+			case "_QuitRequested"
+			case "MainWindow:_QuitRequested"
+				// Terminate running dd process if user quits mid-copy
+				if (isWriting) then
+					pid$ = trim$(system$("cat /tmp/flash_pid.txt 2>/dev/null"))
+					if (pid$ <> "") then
+						dummy$ = system$("kill -9 " + pid$ + " 2>/dev/null")
+					endif
+				endif
+				leavingLoop = true
+				break
+			case "btnAbtClo": // Close Recent Win
+				window close "AboutWin"
+				break
+			case "btnSelect":
+				file$ = FILEPANEL "Load-File", "Select ISO / Image file", "/boot/home", ""
+				if (file$ <> "") then
+					textcontrol set "txtctlSource", file$
+				endif
+				break
+			case "btnRefresh":
+				RefreshTargetList()
+				break
+			case "btnReset":
+				textcontrol set "txtctlSource", ""
+				RefreshTargetList()
+				break
+			case "btnStart":
+				// Validate ISO Selection
+				isoFile$ = TEXTCONTROL GET$ "txtctlSource"
+				if (isoFile$ = "") then
+					alert "Please select a source ISO image first.", "OK", "warning"
+					break
+				endif
+				if (trim$(system$("test -f \"" + isoFile$ + "\" && echo 1")) <> "1") then
+					alert "The selected source ISO image file does not exist.", "OK", "stop"
+					break
+				endif
+
+				// Validate USB Target Selection
+				pos = DROPBOX GET "drpbxTarget"
+				if (pos < 0) then
+					alert "Please select a target USB device.", "OK", "warning"
+					break
+				endif
+				target$ = DROPBOX GET$ "drpbxTarget", pos
+				if (target$ = "" or target$ = "No USB devices found") then
+					alert "Please select a target USB device.", "OK", "warning"
+					break
+				endif
+
+				// Check if the target device is mounted before showing warning
+				targetDir$ = left$(target$, instr(target$, "/raw") - 1)
+				isMounted$ = trim$(system$("df | grep -c \"" + targetDir$ + "/\""))
+				if (val(isMounted$) > 0) then
+					alert "The selected USB device (or one of its partitions) is currently mounted.\nPlease unmount all partitions of the device first.", "OK", "stop"
+					RefreshTargetList()
+					break
+				endif
+
+				// Show target overwrite warning
+				openWarningWin()
+				break
+			case "btnCancel":
+				window close "WarningWin"
+				break
+			case "btnContinue":
+				window close "WarningWin"
+				StartWriting()
+				break
+			default
+				
+		end switch
+
+	next everyCommand
+
+	// Progress writer background monitor loop
+	if (isWriting) then
+		pid$ = trim$(system$("cat /tmp/flash_pid.txt 2>/dev/null"))
+		if (pid$ <> "") then
+			running$ = trim$(system$("kill -0 " + pid$ + " 2>/dev/null && echo 1 || echo 0"))
+			if (running$ = "1") then
+				// Read stdout/stderr stream from background dd process
+				bytesCopied$ = trim$(system$("tr '\\r' '\\n' < /tmp/flash_progress.txt 2>/dev/null | awk '/bytes/{print $1}' | tail -n 1"))
+				bytesCopied = val(bytesCopied$)
+				if (bytesCopied > 0) then
+					percent = (bytesCopied / isoSize) * 100
+					if (percent > 100) percent = 100
+					
+					// Format human-readable output
+					mbCopied = bytesCopied / (1024 * 1024)
+					totalMB = isoSize / (1024 * 1024)
+					lblLeft$ = str$(int(mbCopied)) + " MB / " + str$(int(totalMB)) + " MB"
+					lblRight$ = str$(int(percent)) + "%"
+					
+					statusbar set "statusbar3", lblLeft$, lblRight$, percent
+				endif
+				
+				// Animation cycle USB copy
+				writeIconCount = writeIconCount + 1
+				if (writeIconCount > 3) writeIconCount = 1
+
+//==== CHANGE FILE LOCATION ON BUILD ====				
+				usbImg$ = ""
+				if (writeIconCount = 1) usbImg$ = "/boot/system/apps/Flashaku/data/usb1.png"
+				if (writeIconCount = 2) usbImg$ = "/boot/system/apps/Flashaku/data/usb2.png"
+				if (writeIconCount = 3) usbImg$ = "/boot/system/apps/Flashaku/data/usb3.png"
+				
+				err = draw image 256, 15, usbImg$, "WritingWin"
+			else
+				// copy completed
+				isWriting = false
+				statusbar set "statusbar3", "Finished!", "100%", 100
+				
+				dummy$ = system$("sync") // Ensure caches are flushed
+				
+				alert "ISO Image written successfully to USB drive!", "OK", "info"
+				window close "WritingWin"
+			endif
+		endif
+		// Rest loop cycle slightly to lower idle CPU usage during copying
+		sleep 0.1
+	endif
+
+wend
+
+CloseWindow()
+
+// Final process temp files cleanup
+dummy$ = system$("rm -f /tmp/flash_progress.txt /tmp/flash_pid.txt")
+
+end
+
+
+// Setup the main window here
+sub OpenWindow()
+
+	sw = peek("desktopwidth")
+	sh = peek("desktopheight")
+	mw_width = 380
+	mw_height = 310
+	mw_left = (sw - mw_width) / 2
+	mw_top = (sh - mw_height) / 2
+	mw_right = mw_left + mw_width
+	mw_bottom = mw_top + mw_height
+	
+	window open mw_left, mw_top to mw_right, mw_bottom, "MainWindow", "Flashaku"
+	window set "MainWindow", "flags", "not-zoomable, not-h-resizable, not-v-resizable"
+
+		menu "File", "About", "", "MainWindow"
+		menu "File", "--", "", "MainWindow"
+		menu "File", "Quit", "Q", "MainWindow"
+
+		draw set "highcolor", 100,100,100, "MainWindow"
+			draw set 0, "HighSolidFill"
+			draw rect 10,30 to 370,81, "MainWindow"
+			draw set "highcolor", 255,255,255, "MainWindow"
+				draw set "Noto Sans,Bold,32", "MainWindow"
+				draw text 220,59, "Flashaku", "MainWindow"		
+				draw set "Noto Sans,Italic,14", "MainWindow"
+				draw text 252,75, "USB image writer", "MainWindow"
+			draw set "highcolor", 0,0,0, "MainWindow"
+
+		boxview 10,90 to 370,150, "SourceView", "Source", 2, "MainWindow"
+			textcontrol 05,4 to 245,34, "txtctlSource", "", "", "SourceView"
+				tooltip "txtctlSource", "Enter path to ISO file here or use Select button to browse."
+			button 255,1 to 345,31, "btnSelect", "Select", "SourceView"
+				tooltip "btnSelect", "Use file browser to select ISO file."
+
+		boxview 10,160 to 370,220, "TargetView", "Target", 2, "MainWindow"
+			dropbox 05,4 to 400,34, "drpbxTarget", "", "TargetView"
+				tooltip "drpbxTarget", "Select a target device from list"
+			button 255,1 to 345,31, "btnRefresh", "Refresh", "TargetView"
+				tooltip "btnRefresh", "Refresh target device list"
+
+		draw set "highcolor", 100,100,100, "MainWindow"
+			draw set 0, "HighSolidFill"
+			draw rect 10,270 to 370,300, "MainWindow"
+		draw set "highcolor", 255,255,255, "MainWindow"
+			draw set "Noto Sans,Regular,12", "MainWindow"
+			draw text 17,290, "Make sure the USB flash drive is not mounted.", "MainWindow"
+			draw set "highcolor", 0,0,0, "MainWindow"
+
+		button 195,230 to 370,260, "btnStart", "Start", "MainWindow"
+		button 10,230 to 185,260, "btnReset", "Reset", "MainWindow"
+	return
+	
+end sub
+
+// Custom alert window, Warning
+sub openWarningWin()
+
+	sw = peek("desktopwidth")
+	sh = peek("desktopheight")
+	ww_width = 340
+	ww_height = 190
+	ww_left = (sw - ww_width) / 2
+	ww_top = (sh - ww_height) / 2
+	ww_right = ww_left + ww_width
+	ww_bottom = ww_top + ww_height
+// ==== CHANGE FILE LOCATION ON BUILD ====
+	warnIcon$ = "/boot/system/apps/Flashaku/data/warning.png"
+
+	window open ww_left, ww_top to ww_right, ww_bottom, "WarningWin", "Warning"
+	window set "WarningWin", "flags", "not-zoomable, not-h-resizable, not-v-resizable"
+	window set  "WarningWin", "Look", "Modal"
+	window set "WarningWin", "feel", "Floating-App, Modal-App"
+
+		draw set "highcolor", 200,0,0, "WarningWin"
+			draw set 0, "HighSolidFill"
+			draw rect 10,10 to 330,60, "WarningWin"
+		
+		draw set "highcolor", 255,255,255, "WarningWin"
+			draw set "Noto Sans,Bold,32", "WarningWin"
+			draw text 164,48, "WARNING", "WarningWin"
+			draw set "highcolor", 0,0,0, "WarningWin"
+		
+		err = draw image 15,12, warnIcon$, "WarningWin"
+
+		text 40,86, "label2", "This will erase everything on the target device.", "WarningWin"
+		text 70,104, "label3", "Are you sure you want to continue?", "WarningWin"
+
+		button 230,150 to 320,180, "btnCancel", "Cancel", "WarningWin"
+		button 20,150 to 110,180, "btnContinue", "Continue ", "WarningWin"
+
+	return
+	
+end sub
+
+// Progress writing window
+sub openWritingWin(isoFile$, target$)
+
+	sw = peek("desktopwidth")
+	sh = peek("desktopheight")
+	pw_width = 340
+	pw_height = 135
+	pw_left = (sw - pw_width) / 2
+	pw_top = (sh - pw_height) / 2
+	pw_right = pw_left + pw_width
+	pw_bottom = pw_top + pw_height
+
+// ==== CHANGE FILE LOCATION ON BUILD ====
+	// Code in main loop for Animation cycle
+	usb1$ = "/boot/system/apps/Flashaku/data/usb1.png"
+
+	window open pw_left, pw_top to pw_right, pw_bottom, "WritingWin", "Flashaku - Writing image"
+		window set "WritingWin", "flags", "not-zoomable, not-h-resizable, not-v-resizable"
+		window set "WritingWin", "flags", "Not-Closable"
+		window set "WritingWin", "feel", "Floating-App, Modal-App"
+		window set "WritingWin", "look", "Modal"
+
+	text 20,30, "label4", "Source:", "WritingWin"
+	text 65,30, "label1", filename$(isoFile$), "WritingWin"
+	text 20,60, "label6", "Target:", "WritingWin"
+	text 65,60, "label5", target$, "WritingWin"
+	statusbar 20,80 to 320,110, "statusbar3", "", "", "WritingWin"
+	
+	err = draw image 256,15, usb1$, "WritingWin" 
+
+end sub
+
+// About Window
+sub openAboutWin()
+
+	sw = peek("desktopwidth")
+	sh = peek("desktopheight")
+	aw_width = 340
+	aw_height = 220
+	aw_left = (sw - aw_width) / 2
+	aw_top = (sh - aw_height) / 2
+	aw_right = aw_left + aw_width
+	aw_bottom = aw_top + aw_height
+
+	window open aw_left, aw_top to aw_right, aw_bottom, "AboutWin", "About Flashaku"
+		window set "AboutWin", "flags", "not-zoomable, not-h-resizable, not-v-resizable"
+		window set "AboutWin", "Look", "Modal"
+		window set "AboutWin", "Feel", "Floating-App, Modal-App"
+			
+			draw set "highcolor", 184,184,184, "AboutWin"
+			draw set 0, "HighSolidFill"
+			draw rect 0,0 to 30,220, "AboutWin"
+			draw set "highcolor", 0,0,0, "AboutWin"
+
+			err = draw image 10,12, icon$, "AboutWin"
+			draw set "Noto Sans,Bold,24", "AboutWin"
+				draw text 60,32, ProgramName$, "AboutWin"
+			draw set "Noto Sans,Regular,14", "AboutWin"
+				draw text 60,51, ProgramVersion$, "AboutWin"
+			textedit 60, 63 to 327, 165, "txtedtAbout", 1, "AboutWin"
+				textedit add "txtedtAbout", ProgramBriefDescription$ + "\n\n" + ProgramLicense$ + "\n" + AuthorName$ + "\n" + ProgramAcknowledgements$  + "\n"
+
+			texturl 45,195, "TextURL", "github.com/GearPlot", "https://github.com/gearplot", "AboutWin"
+
+			button 240,180 to 330,210, "btnAbtClo", "Close", "AboutWin"
+
+end sub
+
+// Close down the main window
+sub CloseWindow()
+	window close "MainWindow"
+	return
+end sub
+
+
+// --- Target and Selection Helper Subroutines ---
+
+sub RefreshTargetList()
+	dim dev$(1)
+	dropbox clear "drpbxTarget"
+	// Pull active raw USB device nodes
+	devices$ = system$("find /dev/disk/usb/ -name raw 2>/dev/null")
+	nDevices = token(devices$, dev$(), "\n")
+	cnt = 0
+	for i = 1 to nDevices
+		if (dev$(i) <> "") then
+			pos_raw = instr(dev$(i), "/raw")
+			if (pos_raw > 0) then
+				dir$ = left$(dev$(i), pos_raw - 1)
+				// Count matching lines in df. If > 0, the device or one of its partitions is mounted.
+				isMounted$ = trim$(system$("df | grep -c \"" + dir$ + "/\""))
+				if (val(isMounted$) = 0) then
+					dropbox add "drpbxTarget", dev$(i)
+					cnt = cnt + 1
+				endif
+			endif
+		endif
+	next i
+	if (cnt = 0) then
+		dropbox add "drpbxTarget", "No USB devices found"
+	endif
+	dropbox select "drpbxTarget", 0
+end sub
+
+sub StartWriting()
+	// Declare local variables only; globals are modified directly
+	local isoFile$, target$, targetDir$, isMounted$, copyCmd$, pos
+
+	isoFile$ = TEXTCONTROL GET$ "txtctlSource"
+	pos = DROPBOX GET "drpbxTarget"
+	target$ = DROPBOX GET$ "drpbxTarget", pos
+
+	// Safe double check if target is mounted before triggering dd
+	targetDir$ = left$(target$, instr(target$, "/raw") - 1)
+	isMounted$ = trim$(system$("df | grep -c \"" + targetDir$ + "/\""))
+	if (val(isMounted$) > 0) then
+		alert "The selected USB device is currently mounted. Writing aborted.", "OK", "stop"
+		RefreshTargetList()
+		return
+	endif
+
+	// Resolve the correct target file size
+	isoSize = val(system$("wc -c < \"" + isoFile$ + "\""))
+	if (isoSize <= 0) then
+		alert "Error getting source file size.", "OK", "stop"
+		return
+	endif
+
+	openWritingWin(isoFile$, target$)
+
+	// Execute asynchronous raw write process while storing metadata 
+	system("rm -f /tmp/flash_progress.txt /tmp/flash_pid.txt")
+	copyCmd$ = "dd if=\"" + isoFile$ + "\" of=\"" + target$ + "\" bs=1M status=progress 2> /tmp/flash_progress.txt & echo $! > /tmp/flash_pid.txt"
+	system(copyCmd$)
+
+	isWriting = true
+	writeIconCount = 1
+end sub
+
+sub filename$(path$)
+	local i, p$
+	p$ = path$
+	for i = len(path$) to 1 step -1
+		if (mid$(path$, i, 1) = "/") then
+			p$ = right$(path$, len(path$) - i)
+			break
+		endif
+	next i
+	return p$
+end sub
